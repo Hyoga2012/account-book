@@ -67,7 +67,7 @@ export default function Home() {
       <header className="w-full">
         <div className="mx-auto flex w-full max-w-xl items-center justify-center px-5 py-10 sm:px-6 sm:py-14">
           <h1 className="text-center text-3xl font-semibold tracking-tight text-[#111111] sm:text-[28px]">
-            나의 AI 가계부
+            나의 스마트 가계부
           </h1>
         </div>
       </header>
