@@ -1,4 +1,8 @@
-const GEMINI_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash"] as const;
+const GEMINI_MODELS = [
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+] as const;
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -23,12 +27,15 @@ type GeminiResponse = {
   };
 };
 
-function isQuotaError(message: string): boolean {
+function isRetryableError(message: string): boolean {
   return (
     message.includes("429") ||
     message.includes("RESOURCE_EXHAUSTED") ||
     message.includes("quota") ||
-    message.includes("Quota exceeded")
+    message.includes("Quota exceeded") ||
+    message.includes("high demand") ||
+    message.includes("503") ||
+    message.includes("UNAVAILABLE")
   );
 }
 
@@ -89,7 +96,7 @@ export async function callGemini(
 
       lastError = error;
 
-      if (!isQuotaError(error.message)) {
+      if (!isRetryableError(error.message)) {
         throw error;
       }
     }
@@ -127,8 +134,8 @@ export function getGeminiErrorMessage(error: unknown): string {
     return "Gemini API 키가 유효하지 않습니다. Google AI Studio에서 새 API 키를 발급하고 Vercel 환경 변수를 업데이트해 주세요.";
   }
 
-  if (isQuotaError(message)) {
-    return "AI 요청 한도를 초과했습니다. 1분 정도 기다린 뒤 다시 시도해 주세요.";
+  if (isRetryableError(message)) {
+    return "AI 요청 한도를 초과했거나 서버가 바쁩니다. 잠시 후 다시 시도해 주세요.";
   }
 
   if (

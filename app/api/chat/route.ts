@@ -1,33 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { validateChatEnv } from "@/lib/env";
 import {
-  callGemini,
-  getGeminiErrorMessage,
-  parseGeminiJson,
-} from "@/lib/gemini";
+  buildClarificationReply,
+  ExpenseExtraction,
+  normalizeExtraction,
+  parseExpenseLocally,
+} from "@/lib/expense-parser";
+import { callGemini, parseGeminiJson } from "@/lib/gemini";
 import {
   createServerSupabaseClient,
   Expense,
 } from "@/lib/supabase-server";
+import { ChatMessage } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
-type ChatMessage = {
-  role: "user" | "assistant";
-  content: string;
-};
-
 type MessageIntent = "expense" | "question";
-
-type ExpenseExtraction = {
-  date: string | null;
-  amount: number | null;
-  description: string | null;
-  needs_clarification: boolean;
-  clarification_message: string | null;
-};
 
 function getTodayString(): string {
   const now = new Date();
@@ -61,7 +51,8 @@ function detectIntent(message: string, history: ChatMessage[]): MessageIntent {
     (lastAssistant.content.includes("언제 지출") ||
       lastAssistant.content.includes("얼마를 지출") ||
       lastAssistant.content.includes("저장해 드릴게요") ||
-      lastAssistant.content.includes("알려주시면 저장"));
+      lastAssistant.content.includes("알려주시면 저장") ||
+      lastAssistant.content.includes("어떤 내용"));
 
   if (isExpenseFollowUp) {
     return "expense";
@@ -69,7 +60,7 @@ function detectIntent(message: string, history: ChatMessage[]): MessageIntent {
 
   const isQuestion =
     /[?？]/.test(message) ||
-    /(얼마|뭐|몇|어떻게|무엇|어느|알려줘|총\s*지출|가장\s*많이|뭐\s*샀|지난주|이번\s*달|식비)/.test(
+    /(얼마야|얼마예요|얼마인|뭐야|뭐예요|몇\s*원|어떻게|무엇을|뭐\s*샀|총\s*지출|가장\s*많이|지난주|이번\s*달.*얼마|식비.*얼마)/.test(
       message,
     );
 
@@ -80,7 +71,7 @@ function detectIntent(message: string, history: ChatMessage[]): MessageIntent {
   return "expense";
 }
 
-async function extractExpense(
+async function extractExpenseWithGemini(
   message: string,
   history: ChatMessage[] = [],
 ): Promise<ExpenseExtraction> {
@@ -91,28 +82,52 @@ async function extractExpense(
     `한국어 가계부 지출 분석기. 오늘: ${today} (기본값으로 사용 금지)
 대화 전체 맥락을 보고 지출 정보를 추출하세요.
 
-JSON만 응답:
-{"date":"YYYY-MM-DD|null","amount":정수|null,"description":"내용|null","needs_clarification":true|false,"clarification_message":"질문|null"}
+반드시 아래 JSON 형식으로만 응답:
+{
+  "date": "YYYY-MM-DD 또는 null",
+  "amount": 정수 또는 null,
+  "description": "내용 또는 null",
+  "needs_clarification": true 또는 false,
+  "clarification_message": "질문 또는 null"
+}
 
 규칙:
 - 이전 대화의 금액/내용/날짜를 유지하고 새 메시지로 보완
-- date는 명시적 날짜 언급 시에만 (오늘/어제/8월25일 등), 없으면 null
-- 부족한 정보만 자연스럽게 질문
+- date는 명시적 날짜 언급 시에만, 없으면 null
+- amount는 숫자만 (예: 50000)
+- 정보가 부족하면 needs_clarification을 true로 설정
 
 대화:
 ${conversation}`,
     { json: true },
   );
 
-  const parsed = parseGeminiJson<ExpenseExtraction>(text);
+  return normalizeExtraction(parseGeminiJson<ExpenseExtraction>(text));
+}
 
-  return {
-    date: parsed.date ?? null,
-    amount: parsed.amount ?? null,
-    description: parsed.description ?? null,
-    needs_clarification: Boolean(parsed.needs_clarification),
-    clarification_message: parsed.clarification_message ?? null,
-  };
+async function extractExpense(
+  message: string,
+  history: ChatMessage[] = [],
+): Promise<ExpenseExtraction> {
+  const local = parseExpenseLocally(message, history);
+
+  if (!local.needs_clarification) {
+    return local;
+  }
+
+  try {
+    const gemini = await extractExpenseWithGemini(message, history);
+    return normalizeExtraction({
+      date: gemini.date ?? local.date,
+      amount: gemini.amount ?? local.amount,
+      description: gemini.description ?? local.description,
+      needs_clarification: gemini.needs_clarification,
+      clarification_message: gemini.clarification_message,
+    });
+  } catch (error) {
+    console.error("Gemini extraction failed, using local parser:", error);
+    return local;
+  }
 }
 
 async function answerQuestion(
@@ -151,35 +166,17 @@ async function fetchAllExpenses(): Promise<Expense[]> {
   return data ?? [];
 }
 
-function buildClarificationReply(extraction: ExpenseExtraction): string {
-  if (extraction.clarification_message) {
-    return extraction.clarification_message;
-  }
-
-  if (extraction.amount && extraction.description && !extraction.date) {
-    return `${extraction.description} ${extraction.amount.toLocaleString("ko-KR")}원이시군요! 언제 지출하셨나요? 예: 오늘, 어제, 8월 25일`;
-  }
-
-  if (!extraction.amount && extraction.description) {
-    return `${extraction.description}에 얼마를 지출하셨나요?`;
-  }
-
-  if (extraction.amount && !extraction.description && !extraction.date) {
-    return `${extraction.amount.toLocaleString("ko-KR")}원 지출이시군요! 어떤 내용이었고, 언제 지출하셨나요?`;
-  }
-
-  return "날짜와 금액을 알려주시면 저장해 드릴게요. 예: \"오늘 점심 15000원\"";
-}
-
 async function handleExpenseInput(message: string, history: ChatMessage[]) {
   const extraction = await extractExpense(message, history);
 
-  if (
-    extraction.needs_clarification ||
-    !extraction.date ||
-    !extraction.amount ||
-    !extraction.description
-  ) {
+  if (extraction.needs_clarification) {
+    return NextResponse.json({
+      reply: buildClarificationReply(extraction),
+      saved: false,
+    });
+  }
+
+  if (!extraction.date || !extraction.amount || !extraction.description) {
     return NextResponse.json({
       reply: buildClarificationReply(extraction),
       saved: false,
@@ -217,10 +214,14 @@ async function handleExpenseInput(message: string, history: ChatMessage[]) {
 }
 
 export async function POST(request: NextRequest) {
+  let message = "";
+
   try {
     validateChatEnv();
 
-    const { message, history = [] } = await request.json();
+    const body = await request.json();
+    message = typeof body.message === "string" ? body.message : "";
+    const history = body.history ?? [];
 
     if (!message || typeof message !== "string") {
       return NextResponse.json(
@@ -252,8 +253,22 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Chat API error:", error);
 
+    const local = parseExpenseLocally(message, []);
+
+    if (local.needs_clarification) {
+      return NextResponse.json({
+        reply: buildClarificationReply(local),
+        saved: false,
+      });
+    }
+
     return NextResponse.json(
-      { error: getGeminiErrorMessage(error) },
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "AI 응답을 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.",
+      },
       { status: 500 },
     );
   }
