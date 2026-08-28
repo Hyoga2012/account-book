@@ -1,183 +1,198 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Expense, supabase } from "@/lib/supabase";
 
+type Message = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+};
+
 export default function Home() {
-  const [date, setDate] = useState("");
-  const [amount, setAmount] = useState("");
-  const [description, setDescription] = useState("");
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: "welcome",
+      role: "assistant",
+      content:
+        "안녕하세요! AI 가계부 챗봇이에요. 지출 내역을 자연어로 말씀해 주세요. 예: \"오늘 점심 15000원\"",
+    },
+  ]);
+  const [input, setInput] = useState("");
+  const [loadingExpenses, setLoadingExpenses] = useState(true);
+  const [sending, setSending] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void loadExpenses();
   }, []);
 
-  async function loadExpenses() {
-    setLoading(true);
-    setError(null);
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, sending]);
 
-    const { data, error: fetchError } = await supabase
+  async function loadExpenses() {
+    setLoadingExpenses(true);
+
+    const { data } = await supabase
       .from("expenses")
       .select("*")
       .order("created_at", { ascending: false });
 
-    if (fetchError) {
-      setError(fetchError.message);
-      setExpenses([]);
-    } else {
-      setExpenses(data ?? []);
-    }
-
-    setLoading(false);
+    setExpenses(data ?? []);
+    setLoadingExpenses(false);
   }
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    setSaving(true);
-    setError(null);
+    const trimmed = input.trim();
+    if (!trimmed || sending) return;
 
-    const { error: insertError } = await supabase.from("expenses").insert({
-      date,
-      amount: Number(amount),
-      description,
-    });
+    const history = messages
+      .filter((m) => m.id !== "welcome")
+      .map((m) => ({ role: m.role, content: m.content }));
 
-    if (insertError) {
-      setError(insertError.message);
-      setSaving(false);
-      return;
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: trimmed,
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
+    setSending(true);
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: trimmed, history }),
+      });
+
+      const data = await res.json();
+
+      const assistantMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: res.ok
+          ? data.reply
+          : (data.error ?? "오류가 발생했습니다. 다시 시도해 주세요."),
+      };
+
+      setMessages((prev) => [...prev, assistantMessage]);
+
+      if (res.ok && data.saved) {
+        await loadExpenses();
+      }
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "네트워크 오류가 발생했습니다. 다시 시도해 주세요.",
+        },
+      ]);
+    } finally {
+      setSending(false);
     }
-
-    setDate("");
-    setAmount("");
-    setDescription("");
-    await loadExpenses();
-    setSaving(false);
   }
 
-  const fieldClassName =
-    "h-14 w-full rounded-xl bg-white px-4 text-base text-[#111111] outline-none transition placeholder:text-[#b0b0b0] focus:ring-2 focus:ring-[#111111]/15 sm:h-12 sm:text-[15px]";
-
   return (
-    <div className="flex min-h-full w-full flex-1 flex-col bg-[#fafafa]">
-      <header className="w-full">
-        <div className="mx-auto flex w-full max-w-xl items-center justify-center px-5 py-10 sm:px-6 sm:py-14">
-          <h1 className="text-center text-3xl font-semibold tracking-tight text-[#111111] sm:text-[28px]">
-            나의 스마트 가계부
-          </h1>
-        </div>
+    <div className="flex h-dvh w-full flex-col bg-[#fafafa]">
+      <header className="shrink-0 border-b border-[#eeeeee] bg-white px-4 py-4 sm:px-5">
+        <h1 className="text-center text-lg font-semibold tracking-tight text-[#111111] sm:text-xl">
+          AI 가계부 챗봇
+        </h1>
       </header>
 
-      <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-12 px-5 pb-16 sm:gap-14 sm:px-6">
+      <section className="shrink-0 border-b border-[#eeeeee] bg-white px-4 py-3 sm:px-5">
+        <p className="mb-2 text-xs font-medium text-[#8a8a8a]">저장된 지출</p>
+        {loadingExpenses ? (
+          <p className="py-2 text-sm text-[#8a8a8a]">불러오는 중...</p>
+        ) : expenses.length === 0 ? (
+          <p className="py-2 text-sm text-[#8a8a8a]">저장된 지출이 없습니다.</p>
+        ) : (
+          <div className="flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {expenses.map((expense) => (
+              <article
+                key={expense.id}
+                className="min-w-[160px] shrink-0 rounded-xl bg-[#f3f3f3] px-3.5 py-3 sm:min-w-[180px]"
+              >
+                <p className="truncate text-sm font-medium text-[#111111]">
+                  {expense.description}
+                </p>
+                <p className="mt-1 font-mono text-base font-medium tabular-nums text-[#111111]">
+                  {expense.amount.toLocaleString("ko-KR")}
+                  <span className="ml-0.5 text-xs font-sans font-normal text-[#8a8a8a]">
+                    원
+                  </span>
+                </p>
+                <p className="mt-1 text-xs text-[#8a8a8a]">{expense.date}</p>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-5">
+          <div className="mx-auto flex max-w-2xl flex-col gap-3">
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+              >
+                <div
+                  className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-[15px] leading-relaxed sm:text-base ${
+                    message.role === "user"
+                      ? "rounded-br-sm bg-[#111111] text-white"
+                      : "rounded-bl-sm bg-[#f3f3f3] text-[#111111]"
+                  }`}
+                >
+                  <p className="whitespace-pre-wrap break-words">
+                    {message.content}
+                  </p>
+                </div>
+              </div>
+            ))}
+
+            {sending && (
+              <div className="flex justify-start">
+                <div className="rounded-2xl rounded-bl-sm bg-[#f3f3f3] px-4 py-2.5 text-[15px] text-[#8a8a8a]">
+                  입력 중...
+                </div>
+              </div>
+            )}
+
+            <div ref={chatEndRef} />
+          </div>
+        </div>
+
         <form
           onSubmit={handleSubmit}
-          className="flex w-full flex-col gap-7 rounded-2xl bg-[#f3f3f3] p-6 sm:gap-6 sm:p-8"
+          className="shrink-0 border-t border-[#eeeeee] bg-white px-4 py-3 sm:px-5 sm:py-4"
         >
-          <div className="flex flex-col gap-1.5">
-            <p className="text-base font-medium tracking-tight text-[#111111] sm:text-[15px]">
-              지출 내역 입력
-            </p>
-            <p className="text-base leading-relaxed text-[#8a8a8a] sm:text-sm">
-              날짜, 금액, 내용을 입력한 뒤 저장하세요.
-            </p>
-          </div>
-
-          <label className="flex flex-col gap-2.5 sm:gap-2">
-            <span className="text-base text-[#8a8a8a] sm:text-sm">날짜</span>
-            <input
-              type="date"
-              required
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className={fieldClassName}
-            />
-          </label>
-
-          <label className="flex flex-col gap-2.5 sm:gap-2">
-            <span className="text-base text-[#8a8a8a] sm:text-sm">금액</span>
-            <input
-              type="number"
-              required
-              min={1}
-              step={1}
-              placeholder="예: 12000"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className={`${fieldClassName} font-mono tabular-nums`}
-            />
-          </label>
-
-          <label className="flex flex-col gap-2.5 sm:gap-2">
-            <span className="text-base text-[#8a8a8a] sm:text-sm">내용</span>
+          <div className="mx-auto flex max-w-2xl items-center gap-2">
             <input
               type="text"
-              required
-              placeholder="예: 점심 식사"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className={fieldClassName}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="메시지를 입력하세요"
+              disabled={sending}
+              className="h-12 min-w-0 flex-1 rounded-full bg-[#f3f3f3] px-4 text-base text-[#111111] outline-none placeholder:text-[#b0b0b0] focus:ring-2 focus:ring-[#111111]/10 disabled:opacity-60 sm:h-11 sm:text-[15px]"
             />
-          </label>
-
-          {error && (
-            <p className="text-base text-[#8a8a8a] sm:text-sm">{error}</p>
-          )}
-
-          <button
-            type="submit"
-            disabled={saving}
-            className="mt-1 h-14 w-full rounded-xl bg-[#111111] text-base font-medium text-white transition-colors hover:bg-[#2a2a2a] disabled:cursor-not-allowed disabled:opacity-50 sm:h-12 sm:text-[15px]"
-          >
-            {saving ? "저장 중..." : "저장하기"}
-          </button>
+            <button
+              type="submit"
+              disabled={sending || !input.trim()}
+              className="flex h-12 shrink-0 items-center justify-center rounded-full bg-[#111111] px-5 text-sm font-medium text-white transition-colors hover:bg-[#2a2a2a] disabled:cursor-not-allowed disabled:opacity-40 sm:h-11"
+            >
+              전송
+            </button>
+          </div>
         </form>
-
-        <section className="flex w-full flex-col gap-5">
-          <h2 className="text-base font-medium tracking-tight text-[#111111] sm:text-[15px]">
-            지출 목록
-          </h2>
-
-          {loading ? (
-            <p className="py-6 text-base text-[#8a8a8a] sm:text-sm">
-              불러오는 중...
-            </p>
-          ) : expenses.length === 0 ? (
-            <p className="py-10 text-center text-base text-[#8a8a8a] sm:text-sm">
-              아직 저장된 지출이 없습니다.
-            </p>
-          ) : (
-            <ul className="flex w-full flex-col gap-3">
-              {expenses.map((expense) => (
-                <li
-                  key={expense.id}
-                  className="w-full rounded-2xl bg-[#f3f3f3] px-5 py-5 sm:px-6"
-                >
-                  <div className="flex items-baseline justify-between gap-6">
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-base font-medium tracking-tight text-[#111111] sm:text-[15px]">
-                        {expense.description}
-                      </p>
-                      <p className="mt-1.5 text-base text-[#8a8a8a] sm:text-sm">
-                        {expense.date}
-                      </p>
-                    </div>
-                    <p className="shrink-0 font-mono text-xl font-medium tabular-nums tracking-tight text-[#111111] sm:text-2xl">
-                      {expense.amount.toLocaleString("ko-KR")}
-                      <span className="ml-0.5 text-sm font-sans font-normal text-[#8a8a8a] sm:text-base">
-                        원
-                      </span>
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      </main>
+      </div>
     </div>
   );
 }
