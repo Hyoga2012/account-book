@@ -1,13 +1,15 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
+import { validateChatEnv } from "@/lib/env";
 import {
   createServerSupabaseClient,
   Expense,
 } from "@/lib/supabase-server";
 
-const GEMINI_MODEL = "gemini-3.6-flash";
+export const maxDuration = 60;
+export const dynamic = "force-dynamic";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const GEMINI_MODEL = "gemini-3.6-flash";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -23,6 +25,14 @@ type ExpenseExtraction = {
   needs_clarification: boolean;
   clarification_message: string | null;
 };
+
+function getGenAI() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is not configured");
+  }
+  return new GoogleGenerativeAI(apiKey);
+}
 
 function getTodayString(): string {
   const now = new Date();
@@ -52,51 +62,31 @@ function parseJson<T>(text: string): T {
   return JSON.parse(text) as T;
 }
 
-async function classifyIntent(
-  message: string,
-  history: ChatMessage[] = [],
-): Promise<MessageIntent> {
-  const conversation = formatConversation(history, message);
+function detectIntent(message: string, history: ChatMessage[]): MessageIntent {
+  const lastAssistant = history.filter((m) => m.role === "assistant").at(-1);
 
-  const model = genAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    generationConfig: {
-      responseMimeType: "application/json",
-    },
-  });
+  const isExpenseFollowUp =
+    lastAssistant &&
+    (lastAssistant.content.includes("언제 지출") ||
+      lastAssistant.content.includes("얼마를 지출") ||
+      lastAssistant.content.includes("저장해 드릴게요") ||
+      lastAssistant.content.includes("알려주시면 저장"));
 
-  const result = await model.generateContent({
-    contents: [
-      {
-        role: "user",
-        parts: [
-          {
-            text: `사용자 메시지의 의도를 분류하세요.
+  if (isExpenseFollowUp) {
+    return "expense";
+  }
 
-반드시 아래 JSON 형식으로만 응답하세요:
-{ "intent": "expense" 또는 "question" }
+  const isQuestion =
+    /[?？]/.test(message) ||
+    /(얼마|뭐|몇|어떻게|무엇|어느|알려줘|총\s*지출|가장\s*많이|뭐\s*샀|지난주|이번\s*달|식비)/.test(
+      message,
+    );
 
-분류 기준:
-- "expense": 새로운 지출을 기록하려는 경우
-  - 예: "점심식사 5만원", "오늘 택시 2만원", "어제 커피 5000원"
-  - AI가 날짜/금액을 물어본 뒤 사용자가 "어제", "오늘", "8월 25일"처럼 답하는 경우도 expense
-- "question": 기존 지출 데이터에 대해 묻는 경우
-  - 예: "이번 달 총 지출이 얼마야?", "가장 많이 쓴 항목이 뭐야?", "어제 뭐 샀더라?"
-  - "얼마", "뭐", "어떻게", "몇", "언제" 같은 의문 표현이 포함된 질문
-  - 금액 숫자가 있어도 질문이면 question (예: "이번 달 10만원 넘었어?")
+  if (isQuestion && !/(썼|지출|결제|샀|탔|먹었)/.test(message)) {
+    return "question";
+  }
 
-대화 기록:
-${conversation}`,
-          },
-        ],
-      },
-    ],
-  });
-
-  const { intent } = parseJson<{ intent: MessageIntent }>(
-    result.response.text(),
-  );
-  return intent === "question" ? "question" : "expense";
+  return "expense";
 }
 
 async function extractExpense(
@@ -106,7 +96,7 @@ async function extractExpense(
   const today = getTodayString();
   const conversation = formatConversation(history, message);
 
-  const model = genAI.getGenerativeModel({
+  const model = getGenAI().getGenerativeModel({
     model: GEMINI_MODEL,
     generationConfig: {
       responseMimeType: "application/json",
@@ -171,7 +161,7 @@ async function answerQuestion(
   const conversation = formatConversation(history, message);
   const expenseData = JSON.stringify(expenses, null, 2);
 
-  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+  const model = getGenAI().getGenerativeModel({ model: GEMINI_MODEL });
 
   const result = await model.generateContent({
     contents: [
@@ -220,10 +210,7 @@ async function fetchAllExpenses(): Promise<Expense[]> {
   return data ?? [];
 }
 
-async function handleExpenseInput(
-  message: string,
-  history: ChatMessage[],
-) {
+async function handleExpenseInput(message: string, history: ChatMessage[]) {
   const extraction = await extractExpense(message, history);
 
   if (
@@ -285,6 +272,8 @@ async function handleExpenseInput(
 
 export async function POST(request: NextRequest) {
   try {
+    validateChatEnv();
+
     const { message, history = [] } = await request.json();
 
     if (!message || typeof message !== "string") {
@@ -304,7 +293,7 @@ export async function POST(request: NextRequest) {
         )
       : [];
 
-    const intent = await classifyIntent(message, chatHistory);
+    const intent = detectIntent(message, chatHistory);
 
     if (intent === "question") {
       const expenses = await fetchAllExpenses();
@@ -319,6 +308,17 @@ export async function POST(request: NextRequest) {
     return handleExpenseInput(message, chatHistory);
   } catch (error) {
     console.error("Chat API error:", error);
+
+    if (error instanceof Error && error.message.includes("is not configured")) {
+      return NextResponse.json(
+        {
+          error:
+            "서버 환경 변수가 설정되지 않았습니다. Vercel 대시보드에서 GEMINI_API_KEY와 Supabase 설정을 확인해 주세요.",
+        },
+        { status: 500 },
+      );
+    }
+
     return NextResponse.json(
       { error: "AI 응답을 가져오지 못했습니다. 잠시 후 다시 시도해 주세요." },
       { status: 500 },

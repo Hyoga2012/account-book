@@ -70,13 +70,22 @@ export default function Home() {
         body: JSON.stringify({ message: trimmed, history }),
       });
 
-      const data = await res.json();
+      let data: { reply?: string; error?: string; saved?: boolean };
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(
+          res.status === 504
+            ? "서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요."
+            : "서버 응답을 처리하지 못했습니다.",
+        );
+      }
 
       const assistantMessage: Message = {
         id: crypto.randomUUID(),
         role: "assistant",
         content: res.ok
-          ? data.reply
+          ? (data.reply ?? "응답을 받지 못했습니다.")
           : (data.error ?? "오류가 발생했습니다. 다시 시도해 주세요."),
       };
 
@@ -85,13 +94,18 @@ export default function Home() {
       if (res.ok && data.saved) {
         await loadExpenses();
       }
-    } catch {
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "네트워크 오류가 발생했습니다. 다시 시도해 주세요.";
+
       setMessages((prev) => [
         ...prev,
         {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: "네트워크 오류가 발생했습니다. 다시 시도해 주세요.",
+          content: message,
         },
       ]);
     } finally {
