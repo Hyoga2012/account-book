@@ -70,15 +70,37 @@ export default function Home() {
         body: JSON.stringify({ message: trimmed, history }),
       });
 
+      const responseText = await res.text();
+
       let data: { reply?: string; error?: string; saved?: boolean };
       try {
-        data = await res.json();
+        data = JSON.parse(responseText) as {
+          reply?: string;
+          error?: string;
+          saved?: boolean;
+        };
       } catch {
-        throw new Error(
-          res.status === 504
-            ? "서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요."
-            : "서버 응답을 처리하지 못했습니다.",
-        );
+        const isHtml = /<!doctype html|<html/i.test(responseText);
+
+        if (res.status === 401 && isHtml) {
+          throw new Error(
+            "API 접근이 차단되었습니다. Vercel 설정 → Deployment Protection에서 인증을 해제하거나 API 경로를 허용해 주세요.",
+          );
+        }
+
+        if (res.status === 504 || res.status === 502) {
+          throw new Error(
+            "서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
+          );
+        }
+
+        if (isHtml) {
+          throw new Error(
+            `서버 오류가 발생했습니다. (${res.status}) Vercel Functions 로그를 확인해 주세요.`,
+          );
+        }
+
+        throw new Error("서버 응답을 처리하지 못했습니다.");
       }
 
       const assistantMessage: Message = {
