@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { validateChatEnv } from "@/lib/env";
 import {
-  GEMINI_MODEL,
-  getGenAI,
+  callGemini,
+  getGeminiErrorMessage,
   parseGeminiJson,
-  withTimeout,
 } from "@/lib/gemini";
 import {
   createServerSupabaseClient,
@@ -14,8 +13,6 @@ import {
 export const runtime = "nodejs";
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
-
-const GEMINI_TIMEOUT_MS = 50_000;
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -83,35 +80,6 @@ function detectIntent(message: string, history: ChatMessage[]): MessageIntent {
   return "expense";
 }
 
-async function generateGeminiText(prompt: string): Promise<string> {
-  const model = getGenAI().getGenerativeModel({ model: GEMINI_MODEL });
-
-  const result = await withTimeout(
-    model.generateContent(prompt),
-    GEMINI_TIMEOUT_MS,
-    "Gemini API 응답 시간이 초과되었습니다.",
-  );
-
-  return result.response.text();
-}
-
-async function generateGeminiJson<T>(prompt: string): Promise<T> {
-  const model = getGenAI().getGenerativeModel({
-    model: GEMINI_MODEL,
-    generationConfig: {
-      responseMimeType: "application/json",
-    },
-  });
-
-  const result = await withTimeout(
-    model.generateContent(prompt),
-    GEMINI_TIMEOUT_MS,
-    "Gemini API 응답 시간이 초과되었습니다.",
-  );
-
-  return parseGeminiJson<T>(result.response.text());
-}
-
 async function extractExpense(
   message: string,
   history: ChatMessage[] = [],
@@ -119,7 +87,7 @@ async function extractExpense(
   const today = getTodayString();
   const conversation = formatConversation(history, message);
 
-  const parsed = await generateGeminiJson<ExpenseExtraction>(
+  const text = await callGemini(
     `한국어 가계부 지출 분석기. 오늘: ${today} (기본값으로 사용 금지)
 대화 전체 맥락을 보고 지출 정보를 추출하세요.
 
@@ -133,7 +101,10 @@ JSON만 응답:
 
 대화:
 ${conversation}`,
+    { json: true },
   );
+
+  const parsed = parseGeminiJson<ExpenseExtraction>(text);
 
   return {
     date: parsed.date ?? null,
@@ -152,7 +123,7 @@ async function answerQuestion(
   const today = getTodayString();
   const conversation = formatConversation(history, message);
 
-  return generateGeminiText(
+  return callGemini(
     `친근한 한국어 AI 가계부 챗봇. 오늘: ${today}
 지출 데이터를 분석해 질문에 답하세요. 데이터 없으면 추측하지 마세요.
 
@@ -281,27 +252,8 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Chat API error:", error);
 
-    if (error instanceof Error) {
-      if (error.message.includes("is not configured")) {
-        return NextResponse.json(
-          {
-            error:
-              "서버 환경 변수가 설정되지 않았습니다. Vercel에서 GEMINI_API_KEY와 Supabase 설정을 확인한 뒤 재배포해 주세요.",
-          },
-          { status: 500 },
-        );
-      }
-
-      if (error.message.includes("초과")) {
-        return NextResponse.json(
-          { error: "응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요." },
-          { status: 504 },
-        );
-      }
-    }
-
     return NextResponse.json(
-      { error: "AI 응답을 가져오지 못했습니다. 잠시 후 다시 시도해 주세요." },
+      { error: getGeminiErrorMessage(error) },
       { status: 500 },
     );
   }
