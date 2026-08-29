@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
+import ExpenseCharts from "@/components/ExpenseCharts";
 import { Expense, supabase } from "@/lib/supabase";
 
 type Message = {
@@ -447,7 +448,7 @@ export default function Home() {
 
   return (
     <div className="flex h-dvh w-full items-stretch justify-center bg-[#a8b9c8] sm:bg-[#8fa3b5] sm:p-4 md:p-6">
-      <div className="flex h-full w-full max-w-[420px] flex-col overflow-hidden bg-[#b2c7da] shadow-none sm:max-w-[880px] sm:rounded-xl sm:shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
+      <div className="flex h-full w-full max-w-[420px] flex-col overflow-hidden bg-[#b2c7da] shadow-none sm:max-w-[980px] sm:rounded-xl sm:shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
         <div className="hidden shrink-0 items-center justify-between bg-[#3c3c3c] px-4 py-2 sm:flex">
           <p className="text-[13px] font-medium text-white/90">
             AI 가계부 챗봇
@@ -460,7 +461,7 @@ export default function Home() {
         </div>
 
         <div className="flex min-h-0 flex-1">
-          <aside className="hidden w-[280px] shrink-0 flex-col border-r border-black/10 bg-[#ededed] sm:flex">
+          <aside className="hidden w-[320px] shrink-0 flex-col border-r border-black/10 bg-[#ededed] sm:flex">
             <div className="flex items-center gap-3 border-b border-black/5 bg-white px-4 py-3.5">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#fee500] text-sm font-bold text-[#191919]">
                 AI
@@ -473,11 +474,16 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="border-b border-black/5 bg-white px-4 py-2.5">
-              <p className="text-xs font-medium text-[#999]">저장된 지출</p>
-            </div>
-
             <div className="kakao-scrollbar flex-1 overflow-y-auto">
+              <div className="border-b border-black/5 bg-[#f7f7f7] px-3 py-3">
+                <p className="mb-2 text-xs font-medium text-[#999]">지출 차트</p>
+                {!loadingExpenses && <ExpenseCharts expenses={expenses} />}
+              </div>
+
+              <div className="border-b border-black/5 bg-white px-4 py-2.5">
+                <p className="text-xs font-medium text-[#999]">저장된 지출</p>
+              </div>
+
               {loadingExpenses ? (
                 <p className="px-4 py-6 text-sm text-[#999]">불러오는 중...</p>
               ) : expenses.length === 0 ? (
@@ -566,6 +572,12 @@ export default function Home() {
                       </p>
                     </article>
                   ))}
+                </div>
+              )}
+
+              {!loadingExpenses && expenses.length > 0 && (
+                <div className="mt-2 max-h-[220px] overflow-y-auto rounded-xl">
+                  <ExpenseCharts expenses={expenses} compact />
                 </div>
               )}
             </section>
