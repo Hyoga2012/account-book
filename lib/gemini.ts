@@ -6,6 +6,15 @@ const GEMINI_MODELS = [
 
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
+export type GeminiImagePart = {
+  mimeType: string;
+  data: string;
+};
+
+type GeminiPart =
+  | { text: string }
+  | { inlineData: { mimeType: string; data: string } };
+
 function getApiKey(): string {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
@@ -41,7 +50,7 @@ function isRetryableError(message: string): boolean {
 
 async function callGeminiWithModel(
   model: string,
-  prompt: string,
+  parts: GeminiPart[],
   options?: { json?: boolean },
 ): Promise<string> {
   const apiKey = getApiKey();
@@ -55,7 +64,7 @@ async function callGeminiWithModel(
         "x-goog-api-key": apiKey,
       },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
+        contents: [{ parts }],
         ...(options?.json
           ? { generationConfig: { responseMimeType: "application/json" } }
           : {}),
@@ -80,15 +89,15 @@ async function callGeminiWithModel(
   return text;
 }
 
-export async function callGemini(
-  prompt: string,
+async function callGeminiParts(
+  parts: GeminiPart[],
   options?: { json?: boolean },
 ): Promise<string> {
   let lastError: Error | null = null;
 
   for (const model of GEMINI_MODELS) {
     try {
-      return await callGeminiWithModel(model, prompt, options);
+      return await callGeminiWithModel(model, parts, options);
     } catch (error) {
       if (!(error instanceof Error)) {
         throw error;
@@ -103,6 +112,32 @@ export async function callGemini(
   }
 
   throw lastError ?? new Error("Gemini API 호출에 실패했습니다.");
+}
+
+export async function callGemini(
+  prompt: string,
+  options?: { json?: boolean },
+): Promise<string> {
+  return callGeminiParts([{ text: prompt }], options);
+}
+
+export async function callGeminiVision(
+  prompt: string,
+  image: GeminiImagePart,
+  options?: { json?: boolean },
+): Promise<string> {
+  return callGeminiParts(
+    [
+      { text: prompt },
+      {
+        inlineData: {
+          mimeType: image.mimeType,
+          data: image.data,
+        },
+      },
+    ],
+    options,
+  );
 }
 
 export function parseGeminiJson<T>(text: string): T {

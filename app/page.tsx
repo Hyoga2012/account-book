@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { Expense, supabase } from "@/lib/supabase";
 
 type Message = {
@@ -59,7 +59,7 @@ export default function Home() {
       id: "welcome",
       role: "assistant",
       content:
-        "안녕하세요! AI 가계부 챗봇이에요.\n지출 내역을 자연어로 말씀해 주세요.\n예: \"오늘 점심 15000원\"\n마이크 버튼으로 음성 입력도 가능해요.",
+        "안녕하세요! AI 가계부 챗봇이에요.\n지출 내역을 자연어로 말씀해 주세요.\n예: \"오늘 점심 15000원\"\n마이크·영수증 사진으로도 입력할 수 있어요.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -67,8 +67,10 @@ export default function Home() {
   const [sending, setSending] = useState(false);
   const [listening, setListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
+  const [uploadingReceipt, setUploadingReceipt] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const messagesRef = useRef(messages);
   const sendingRef = useRef(sending);
@@ -317,7 +319,131 @@ export default function Home() {
     startListening();
   }
 
-  const canSend = input.trim().length > 0 && !sending && !listening;
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result !== "string") {
+          reject(new Error("이미지를 읽을 수 없습니다."));
+          return;
+        }
+        const base64 = result.includes(",") ? result.split(",")[1] : result;
+        resolve(base64);
+      };
+      reader.onerror = () => reject(new Error("이미지를 읽을 수 없습니다."));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handleReceiptUpload(file: File) {
+    if (sending || listening || uploadingReceipt) return;
+
+    if (!file.type.startsWith("image/")) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "이미지 파일만 업로드할 수 있어요.",
+        },
+      ]);
+      return;
+    }
+
+    if (file.size > 4 * 1024 * 1024) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "이미지가 너무 큽니다. 4MB 이하로 업로드해 주세요.",
+        },
+      ]);
+      return;
+    }
+
+    setUploadingReceipt(true);
+    setSending(true);
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: `영수증 사진을 올렸어요 📷\n(${file.name})`,
+      },
+    ]);
+
+    try {
+      const imageBase64 = await fileToBase64(file);
+
+      const res = await fetch("/api/receipt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageBase64,
+          mimeType: file.type || "image/jpeg",
+        }),
+      });
+
+      const responseText = await res.text();
+      let data: { reply?: string; error?: string; saved?: boolean };
+
+      try {
+        data = JSON.parse(responseText) as {
+          reply?: string;
+          error?: string;
+          saved?: boolean;
+        };
+      } catch {
+        throw new Error("영수증 분석 응답을 처리하지 못했습니다.");
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: res.ok
+            ? (data.reply ?? "영수증을 처리하지 못했습니다.")
+            : (data.error ?? "영수증 분석 중 오류가 발생했습니다."),
+        },
+      ]);
+
+      if (res.ok && data.saved) {
+        await loadExpenses();
+      }
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content:
+            error instanceof Error
+              ? error.message
+              : "영수증 업로드 중 오류가 발생했습니다.",
+        },
+      ]);
+    } finally {
+      setUploadingReceipt(false);
+      setSending(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  }
+
+  function onReceiptFileChange(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) {
+      void handleReceiptUpload(file);
+    }
+  }
+
+  const canSend =
+    input.trim().length > 0 && !sending && !listening && !uploadingReceipt;
 
   return (
     <div className="flex h-dvh w-full items-stretch justify-center bg-[#a8b9c8] sm:bg-[#8fa3b5] sm:p-4 md:p-6">
@@ -398,11 +524,13 @@ export default function Home() {
                   AI 가계부 챗봇
                 </h1>
                 <p className="truncate text-[11px] text-[#999] sm:text-xs">
-                  {listening
-                    ? "듣고 있어요..."
-                    : expenses.length > 0
-                      ? `지출 ${expenses.length}건`
-                      : "대화를 시작해 보세요"}
+                  {uploadingReceipt
+                    ? "영수증 분석 중..."
+                    : listening
+                      ? "듣고 있어요..."
+                      : expenses.length > 0
+                        ? `지출 ${expenses.length}건`
+                        : "대화를 시작해 보세요"}
                 </p>
               </div>
             </header>
@@ -484,7 +612,15 @@ export default function Home() {
                   </div>
                 )}
 
-                {sending && (
+                {uploadingReceipt && (
+                  <div className="flex justify-center py-1">
+                    <div className="flex items-center gap-2 rounded-full bg-white/90 px-4 py-2 text-[13px] text-[#191919] shadow-[0_1px_3px_rgba(0,0,0,0.1)]">
+                      영수증을 분석하고 있어요...
+                    </div>
+                  </div>
+                )}
+
+                {sending && !uploadingReceipt && (
                   <div className="flex items-end gap-2">
                     <div className="mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#fee500] text-[11px] font-bold text-[#191919]">
                       AI
@@ -512,11 +648,37 @@ export default function Home() {
               onSubmit={handleSubmit}
               className="shrink-0 border-t border-black/5 bg-white px-2.5 py-2 sm:px-3 sm:py-2.5"
             >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif"
+                className="hidden"
+                onChange={onReceiptFileChange}
+              />
+
               <div className="mx-auto flex max-w-[640px] items-end gap-1.5 sm:gap-2">
                 <button
                   type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={sending || listening || uploadingReceipt}
+                  aria-label="영수증 사진 업로드"
+                  title="영수증 사진 업로드"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#f5f5f5] text-[#555] transition-colors hover:bg-[#ebebeb] disabled:cursor-not-allowed disabled:opacity-40 sm:h-10 sm:w-10"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    className="h-5 w-5"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path d="M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2ZM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5ZM8 8a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z" />
+                  </svg>
+                </button>
+
+                <button
+                  type="button"
                   onClick={toggleListening}
-                  disabled={sending || !speechSupported}
+                  disabled={sending || uploadingReceipt || !speechSupported}
                   aria-label={listening ? "음성 인식 중지" : "음성 인식 시작"}
                   title={
                     speechSupported
@@ -549,11 +711,13 @@ export default function Home() {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   placeholder={
-                    listening
-                      ? "듣고 있어요..."
-                      : "메시지를 입력하거나 마이크를 눌러보세요"
+                    uploadingReceipt
+                      ? "영수증 분석 중..."
+                      : listening
+                        ? "듣고 있어요..."
+                        : "메시지 · 마이크 · 영수증 사진"
                   }
-                  disabled={sending || listening}
+                  disabled={sending || listening || uploadingReceipt}
                   className="min-h-9 min-w-0 flex-1 rounded-[20px] bg-[#f5f5f5] px-4 py-2 text-[15px] text-[#191919] outline-none placeholder:text-[#b0b0b0] disabled:opacity-60 sm:min-h-10 sm:text-[14px]"
                 />
 
