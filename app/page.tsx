@@ -1,7 +1,13 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
+import BudgetPanel from "@/components/BudgetPanel";
 import ExpenseCharts from "@/components/ExpenseCharts";
+import {
+  getBudgetStatus,
+  getBudgetWarningMessage,
+  loadBudget,
+} from "@/lib/budget";
 import { Expense, supabase } from "@/lib/supabase";
 
 type Message = {
@@ -69,6 +75,7 @@ export default function Home() {
   const [listening, setListening] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
   const [uploadingReceipt, setUploadingReceipt] = useState(false);
+  const [budget, setBudget] = useState(0);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -86,6 +93,7 @@ export default function Home() {
 
   useEffect(() => {
     void loadExpenses();
+    setBudget(loadBudget());
   }, []);
 
   useEffect(() => {
@@ -102,6 +110,21 @@ export default function Home() {
     };
   }, []);
 
+  function maybeWarnBudget(nextExpenses: Expense[]) {
+    const status = getBudgetStatus(nextExpenses, loadBudget());
+    const warning = getBudgetWarningMessage(status);
+    if (!warning) return;
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: warning,
+      },
+    ]);
+  }
+
   async function loadExpenses() {
     setLoadingExpenses(true);
 
@@ -110,8 +133,10 @@ export default function Home() {
       .select("*")
       .order("created_at", { ascending: false });
 
-    setExpenses(data ?? []);
+    const next = data ?? [];
+    setExpenses(next);
     setLoadingExpenses(false);
+    return next;
   }
 
   async function sendToGemini(text: string) {
@@ -183,7 +208,8 @@ export default function Home() {
       setMessages((prev) => [...prev, assistantMessage]);
 
       if (res.ok && data.saved) {
-        await loadExpenses();
+        const nextExpenses = await loadExpenses();
+        maybeWarnBudget(nextExpenses);
       }
     } catch (error) {
       const message =
@@ -413,7 +439,8 @@ export default function Home() {
       ]);
 
       if (res.ok && data.saved) {
-        await loadExpenses();
+        const nextExpenses = await loadExpenses();
+        maybeWarnBudget(nextExpenses);
       }
     } catch (error) {
       setMessages((prev) => [
@@ -476,7 +503,14 @@ export default function Home() {
 
             <div className="kakao-scrollbar flex-1 overflow-y-auto">
               <div className="border-b border-black/5 bg-[#f7f7f7] px-3 py-3">
-                <p className="mb-2 text-xs font-medium text-[#999]">지출 차트</p>
+                <p className="mb-2 text-xs font-medium text-[#999]">월 예산</p>
+                <BudgetPanel
+                  expenses={expenses}
+                  onBudgetChange={(value) => setBudget(value)}
+                />
+                <p className="mt-3 mb-2 text-xs font-medium text-[#999]">
+                  지출 차트
+                </p>
                 {!loadingExpenses && <ExpenseCharts expenses={expenses} />}
               </div>
 
@@ -534,14 +568,24 @@ export default function Home() {
                     ? "영수증 분석 중..."
                     : listening
                       ? "듣고 있어요..."
-                      : expenses.length > 0
-                        ? `지출 ${expenses.length}건`
-                        : "대화를 시작해 보세요"}
+                      : budget > 0
+                        ? `${getBudgetStatus(expenses, budget).percent}% 예산 사용`
+                        : expenses.length > 0
+                          ? `지출 ${expenses.length}건`
+                          : "대화를 시작해 보세요"}
                 </p>
               </div>
             </header>
 
             <section className="shrink-0 border-b border-black/5 bg-white/80 px-3 py-2 sm:hidden">
+              <div className="mb-2">
+                <BudgetPanel
+                  expenses={expenses}
+                  compact
+                  onBudgetChange={(value) => setBudget(value)}
+                />
+              </div>
+
               <p className="mb-1.5 text-[11px] font-medium text-[#999]">
                 저장된 지출
               </p>
