@@ -9,6 +9,49 @@ type Message = {
   content: string;
 };
 
+type SpeechRecognitionResultLike = {
+  readonly isFinal: boolean;
+  readonly [index: number]: { transcript: string };
+};
+
+type SpeechRecognitionEventLike = Event & {
+  readonly resultIndex: number;
+  readonly results: {
+    readonly length: number;
+    [index: number]: SpeechRecognitionResultLike;
+  };
+};
+
+type SpeechRecognitionErrorEventLike = Event & {
+  readonly error: string;
+};
+
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+  onend: (() => void) | null;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+function getSpeechRecognition(): SpeechRecognitionConstructor | null {
+  if (typeof window === "undefined") return null;
+
+  const win = window as Window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+
+  return win.SpeechRecognition ?? win.webkitSpeechRecognition ?? null;
+}
+
 export default function Home() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [messages, setMessages] = useState<Message[]>([
@@ -16,14 +59,27 @@ export default function Home() {
       id: "welcome",
       role: "assistant",
       content:
-        "안녕하세요! AI 가계부 챗봇이에요.\n지출 내역을 자연어로 말씀해 주세요.\n예: \"오늘 점심 15000원\"",
+        "안녕하세요! AI 가계부 챗봇이에요.\n지출 내역을 자연어로 말씀해 주세요.\n예: \"오늘 점심 15000원\"\n마이크 버튼으로 음성 입력도 가능해요.",
     },
   ]);
   const [input, setInput] = useState("");
   const [loadingExpenses, setLoadingExpenses] = useState(true);
   const [sending, setSending] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const messagesRef = useRef(messages);
+  const sendingRef = useRef(sending);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    sendingRef.current = sending;
+  }, [sending]);
 
   useEffect(() => {
     void loadExpenses();
@@ -31,7 +87,17 @@ export default function Home() {
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, sending]);
+  }, [messages, sending, listening]);
+
+  useEffect(() => {
+    const SpeechRecognitionAPI = getSpeechRecognition();
+    setSpeechSupported(Boolean(SpeechRecognitionAPI));
+
+    return () => {
+      recognitionRef.current?.abort();
+      recognitionRef.current = null;
+    };
+  }, []);
 
   async function loadExpenses() {
     setLoadingExpenses(true);
@@ -45,12 +111,11 @@ export default function Home() {
     setLoadingExpenses(false);
   }
 
-  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const trimmed = input.trim();
-    if (!trimmed || sending) return;
+  async function sendToGemini(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed || sendingRef.current) return;
 
-    const history = messages
+    const history = messagesRef.current
       .filter((m) => m.id !== "welcome")
       .map((m) => ({ role: m.role, content: m.content }));
 
@@ -137,13 +202,126 @@ export default function Home() {
     }
   }
 
-  const canSend = input.trim().length > 0 && !sending;
+  function handleSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    void sendToGemini(input);
+  }
+
+  function stopListening() {
+    recognitionRef.current?.stop();
+    setListening(false);
+  }
+
+  function startListening() {
+    const SpeechRecognitionAPI = getSpeechRecognition();
+
+    if (!SpeechRecognitionAPI) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content:
+            "이 브라우저는 음성 인식을 지원하지 않습니다. Chrome 또는 Edge를 사용해 주세요.",
+        },
+      ]);
+      return;
+    }
+
+    if (sending || listening) return;
+
+    recognitionRef.current?.abort();
+
+    const recognition = new SpeechRecognitionAPI();
+    recognition.lang = "ko-KR";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    let finalTranscript = "";
+
+    recognition.onresult = (event: SpeechRecognitionEventLike) => {
+      let interim = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const transcript = result[0]?.transcript ?? "";
+
+        if (result.isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interim += transcript;
+        }
+      }
+
+      setInput((finalTranscript + interim).trim());
+    };
+
+    recognition.onerror = (event: SpeechRecognitionErrorEventLike) => {
+      setListening(false);
+
+      if (event.error === "aborted" || event.error === "no-speech") {
+        return;
+      }
+
+      const errorMessage =
+        event.error === "not-allowed"
+          ? "마이크 권한이 필요합니다. 브라우저에서 마이크 사용을 허용해 주세요."
+          : "음성 인식 중 오류가 발생했습니다. 다시 시도해 주세요.";
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: errorMessage,
+        },
+      ]);
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+      recognitionRef.current = null;
+
+      const text = finalTranscript.trim();
+      if (text) {
+        void sendToGemini(text);
+      }
+    };
+
+    recognitionRef.current = recognition;
+
+    try {
+      recognition.start();
+      setListening(true);
+      setInput("");
+    } catch {
+      setListening(false);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "음성 인식을 시작할 수 없습니다. 다시 시도해 주세요.",
+        },
+      ]);
+    }
+  }
+
+  function toggleListening() {
+    if (listening) {
+      stopListening();
+      return;
+    }
+
+    startListening();
+  }
+
+  const canSend = input.trim().length > 0 && !sending && !listening;
 
   return (
     <div className="flex h-dvh w-full items-stretch justify-center bg-[#a8b9c8] sm:bg-[#8fa3b5] sm:p-4 md:p-6">
-      {/* PC: KakaoTalk window chrome */}
       <div className="flex h-full w-full max-w-[420px] flex-col overflow-hidden bg-[#b2c7da] shadow-none sm:max-w-[880px] sm:rounded-xl sm:shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
-        {/* Title bar (PC) */}
         <div className="hidden shrink-0 items-center justify-between bg-[#3c3c3c] px-4 py-2 sm:flex">
           <p className="text-[13px] font-medium text-white/90">
             AI 가계부 챗봇
@@ -156,7 +334,6 @@ export default function Home() {
         </div>
 
         <div className="flex min-h-0 flex-1">
-          {/* PC left panel: expenses like friend list */}
           <aside className="hidden w-[280px] shrink-0 flex-col border-r border-black/10 bg-[#ededed] sm:flex">
             <div className="flex items-center gap-3 border-b border-black/5 bg-white px-4 py-3.5">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#fee500] text-sm font-bold text-[#191919]">
@@ -211,9 +388,7 @@ export default function Home() {
             </div>
           </aside>
 
-          {/* Chat room */}
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {/* Chat header */}
             <header className="flex shrink-0 items-center gap-3 border-b border-black/5 bg-white/95 px-3 py-2.5 backdrop-blur-sm sm:px-4 sm:py-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-[10px] bg-[#fee500] text-[13px] font-bold text-[#191919] sm:h-10 sm:w-10">
                 AI
@@ -223,14 +398,15 @@ export default function Home() {
                   AI 가계부 챗봇
                 </h1>
                 <p className="truncate text-[11px] text-[#999] sm:text-xs">
-                  {expenses.length > 0
-                    ? `지출 ${expenses.length}건`
-                    : "대화를 시작해 보세요"}
+                  {listening
+                    ? "듣고 있어요..."
+                    : expenses.length > 0
+                      ? `지출 ${expenses.length}건`
+                      : "대화를 시작해 보세요"}
                 </p>
               </div>
             </header>
 
-            {/* Mobile expenses strip */}
             <section className="shrink-0 border-b border-black/5 bg-white/80 px-3 py-2 sm:hidden">
               <p className="mb-1.5 text-[11px] font-medium text-[#999]">
                 저장된 지출
@@ -266,7 +442,6 @@ export default function Home() {
               )}
             </section>
 
-            {/* Messages */}
             <div className="kakao-scrollbar flex-1 overflow-y-auto px-3 py-4 sm:px-5">
               <div className="mx-auto flex max-w-[640px] flex-col gap-3">
                 {messages.map((message) =>
@@ -297,6 +472,18 @@ export default function Home() {
                   ),
                 )}
 
+                {listening && (
+                  <div className="flex justify-center py-1">
+                    <div className="flex items-center gap-2 rounded-full bg-white/90 px-4 py-2 text-[13px] text-[#191919] shadow-[0_1px_3px_rgba(0,0,0,0.1)]">
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
+                        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+                      </span>
+                      음성 인식 중... 말씀해 주세요
+                    </div>
+                  </div>
+                )}
+
                 {sending && (
                   <div className="flex items-end gap-2">
                     <div className="mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-[#fee500] text-[11px] font-bold text-[#191919]">
@@ -321,23 +508,52 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Input bar */}
             <form
               onSubmit={handleSubmit}
               className="shrink-0 border-t border-black/5 bg-white px-2.5 py-2 sm:px-3 sm:py-2.5"
             >
-              <div className="mx-auto flex max-w-[640px] items-end gap-2">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[#888] sm:h-10 sm:w-10">
-                  <span className="text-2xl leading-none font-light">+</span>
-                </div>
+              <div className="mx-auto flex max-w-[640px] items-end gap-1.5 sm:gap-2">
+                <button
+                  type="button"
+                  onClick={toggleListening}
+                  disabled={sending || !speechSupported}
+                  aria-label={listening ? "음성 인식 중지" : "음성 인식 시작"}
+                  title={
+                    speechSupported
+                      ? listening
+                        ? "음성 인식 중지"
+                        : "음성으로 입력"
+                      : "이 브라우저는 음성 인식을 지원하지 않습니다"
+                  }
+                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors sm:h-10 sm:w-10 ${
+                    listening
+                      ? "bg-red-500 text-white"
+                      : speechSupported
+                        ? "bg-[#f5f5f5] text-[#555] hover:bg-[#ebebeb]"
+                        : "cursor-not-allowed bg-[#f0f0f0] text-[#ccc]"
+                  }`}
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    className="h-5 w-5"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
+                  </svg>
+                </button>
 
                 <input
                   ref={inputRef}
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder="메시지를 입력하세요"
-                  disabled={sending}
+                  placeholder={
+                    listening
+                      ? "듣고 있어요..."
+                      : "메시지를 입력하거나 마이크를 눌러보세요"
+                  }
+                  disabled={sending || listening}
                   className="min-h-9 min-w-0 flex-1 rounded-[20px] bg-[#f5f5f5] px-4 py-2 text-[15px] text-[#191919] outline-none placeholder:text-[#b0b0b0] disabled:opacity-60 sm:min-h-10 sm:text-[14px]"
                 />
 
